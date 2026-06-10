@@ -4,8 +4,12 @@ Run locally:   streamlit run app.py
 On iPhone:     open the deployed URL in Safari -> Share -> Add to Home Screen.
 
 You describe your loan as it is *today* (current balance, rate, remaining
-term), then build a few scenarios — extra monthly payments and one-off lump
-sums — and compare them side by side.
+term), then build a few scenarios — extra monthly payments, one-off lump sums,
+and optional recast — and compare them side by side.
+
+Layout note: everything lives in the main page (no sidebar) so the inputs stay
+visible on a phone, and numeric inputs use number fields (not an editable
+table) so the iPhone keyboard appears reliably.
 """
 
 import calendar
@@ -16,44 +20,40 @@ import streamlit as st
 
 from mortgage import Loan, Scenario, LumpSum, amortize, add_months
 
-st.set_page_config(page_title="Mortgage What-If", page_icon="🏠", layout="wide")
+st.set_page_config(page_title="Mortgage What-If", page_icon="🏠", layout="centered")
 
 MONTHS = list(calendar.month_name)[1:]  # ["January", ..., "December"]
+MAX_LUMPS = 4
 
 
 def money(x: float) -> str:
     return f"${x:,.0f}"
 
 
+st.title("🏠 Mortgage What-If Explorer")
+
 # --------------------------------------------------------------------------- #
-# Sidebar: your loan today
+# Your loan today (main page, always visible)
 # --------------------------------------------------------------------------- #
-with st.sidebar:
-    st.header("Your loan today")
+with st.expander("⚙️  Your loan today", expanded=True):
     st.caption("Enter the loan as it stands right now — not as a brand-new loan.")
 
-    balance = st.number_input(
-        "Current balance ($)", min_value=0.0, value=400_000.0, step=1_000.0,
-        help="The principal you still owe today.",
-    )
-    rate_pct = st.number_input(
-        "Interest rate (% per year)", min_value=0.0, max_value=30.0,
-        value=6.0, step=0.125, format="%.3f",
-    )
-
-    st.markdown("**Remaining term**")
     c1, c2 = st.columns(2)
-    years = c1.number_input("Years", min_value=0, max_value=40, value=25, step=1)
-    extra_term_months = c2.number_input("+ Months", min_value=0, max_value=11, value=0, step=1)
+    balance = c1.number_input("Current balance ($)", min_value=0.0,
+                              value=400_000.0, step=1_000.0)
+    rate_pct = c2.number_input("Interest rate (% / year)", min_value=0.0,
+                               max_value=30.0, value=6.0, step=0.125, format="%.3f")
+
+    c3, c4 = st.columns(2)
+    years = c3.number_input("Years remaining", min_value=0, max_value=40, value=25, step=1)
+    extra_term_months = c4.number_input("+ Months", min_value=0, max_value=11, value=0, step=1)
     remaining_months = int(years) * 12 + int(extra_term_months)
 
-    st.markdown("**Next payment date**")
-    c3, c4 = st.columns(2)
-    start_month = c3.selectbox("Month", range(1, 13),
+    c5, c6 = st.columns(2)
+    start_month = c5.selectbox("Next payment month", range(1, 13),
                                index=5, format_func=lambda m: MONTHS[m - 1])
-    start_year = c4.number_input("Year", min_value=2000, max_value=2100, value=2026, step=1)
+    start_year = c6.number_input("Year", min_value=2000, max_value=2100, value=2026, step=1)
 
-    st.divider()
     auto_payment = st.checkbox("Compute my payment automatically", value=True,
                                help="Off = type in your actual statement payment.")
 
@@ -70,28 +70,23 @@ with st.sidebar:
         payment_override = None
         st.metric("Monthly payment (P&I)", money(std_pmt))
     else:
-        payment_override = st.number_input(
-            "Your monthly payment (P&I, $)", min_value=0.0,
-            value=float(round(std_pmt, 2)), step=10.0,
-        )
+        payment_override = st.number_input("Your monthly payment (P&I, $)",
+                                           min_value=0.0, value=float(round(std_pmt, 2)), step=10.0)
 
+if remaining_months <= 0:
+    st.warning("Set 'Years remaining' (or months) greater than zero to begin.")
+    st.stop()
 
 # --------------------------------------------------------------------------- #
-# Main: scenario builder
+# Scenario builder
 # --------------------------------------------------------------------------- #
-st.title("🏠 Mortgage What-If Explorer")
 st.write(
     "Compare how extra monthly payments and one-time lump sums change your "
     "payoff date and total interest. The first scenario is your baseline."
 )
 
-if remaining_months <= 0:
-    st.warning("Set a remaining term greater than zero in the sidebar to begin.")
-    st.stop()
-
 n_scenarios = st.slider("How many scenarios to compare?", 1, 4, 2)
 
-# Build a config UI for each scenario inside tabs.
 default_names = ["Baseline", "Extra monthly", "Lump sum", "Both"]
 scenarios: list[Scenario] = []
 
@@ -112,32 +107,26 @@ for i, tab in enumerate(tabs):
                  "Off: payment stays the same and the loan finishes earlier.",
         )
 
-        st.caption("One-time lump-sum principal payments (leave empty for none):")
-        lump_df = st.data_editor(
-            pd.DataFrame({"Year": pd.Series(dtype="Int64"),
-                          "Month": pd.Series(dtype="Int64"),
-                          "Amount ($)": pd.Series(dtype="float")}),
-            num_rows="dynamic",
-            key=f"lumps_{i}",
-            hide_index=True,
-            column_config={
-                "Year": st.column_config.NumberColumn(min_value=2000, max_value=2100, step=1),
-                "Month": st.column_config.NumberColumn(min_value=1, max_value=12, step=1),
-                "Amount ($)": st.column_config.NumberColumn(min_value=0.0, step=500.0, format="$%d"),
-            },
-            width="stretch",
-        )
+        n_lumps = st.number_input("How many lump-sum payments?", min_value=0,
+                                  max_value=MAX_LUMPS, value=0, step=1, key=f"nlumps_{i}")
 
         lump_sums: list[LumpSum] = []
-        for _, r in lump_df.iterrows():
-            if pd.isna(r["Year"]) or pd.isna(r["Month"]) or pd.isna(r["Amount ($)"]):
-                continue
-            month_index = (int(r["Year"]) - loan.start_year) * 12 + (int(r["Month"]) - loan.start_month)
+        for j in range(int(n_lumps)):
+            st.markdown(f"**Lump sum {j + 1}**")
+            lc1, lc2, lc3 = st.columns(3)
+            ly = lc1.number_input("Year", min_value=loan.start_year,
+                                  max_value=loan.start_year + 40, value=loan.start_year,
+                                  step=1, key=f"ly_{i}_{j}")
+            lm = lc2.selectbox("Month", range(1, 13), index=loan.start_month - 1,
+                               format_func=lambda m: MONTHS[m - 1], key=f"lm_{i}_{j}")
+            la = lc3.number_input("Amount ($)", min_value=0.0, value=10_000.0,
+                                  step=500.0, key=f"la_{i}_{j}")
+
+            month_index = (int(ly) - loan.start_year) * 12 + (int(lm) - loan.start_month)
             if month_index < 0:
-                st.warning(f"Lump sum dated {int(r['Month'])}/{int(r['Year'])} is before "
-                           "your start date and was ignored.")
-                continue
-            lump_sums.append(LumpSum(month_index=month_index, amount=float(r["Amount ($)"])))
+                st.warning(f"Lump sum {j + 1} is dated before your start date — ignored.")
+            elif la > 0:
+                lump_sums.append(LumpSum(month_index=month_index, amount=float(la)))
 
         scenarios.append(Scenario(name=name or f"Scenario {i + 1}", extra_monthly=extra,
                                   lump_sums=lump_sums, recast_on_lump=recast))
@@ -191,7 +180,6 @@ st.subheader("Balance over time")
 chart_data = []
 for sc, sch in zip(scenarios, schedules):
     for row in sch.rows:
-        # Use day 1 of each month as the plotted date.
         chart_data.append({
             "date": pd.Timestamp(year=row.year, month=row.month, day=1),
             "Balance": row.end_balance,
@@ -210,7 +198,7 @@ line = (
                  alt.Tooltip("Balance:Q", format="$,.0f"),
                  "Scenario:N"],
     )
-    .properties(height=380)
+    .properties(height=360)
     .interactive()
 )
 st.altair_chart(line, width="stretch")
@@ -221,11 +209,11 @@ st.altair_chart(line, width="stretch")
 st.subheader("Balance at a specific time")
 st.caption("Pick any year and month to see where each scenario stands then.")
 
-c5, c6 = st.columns(2)
-look_month = c5.selectbox("Month", range(1, 13), index=loan.start_month - 1,
+c7, c8 = st.columns(2)
+look_month = c7.selectbox("Month", range(1, 13), index=loan.start_month - 1,
                           format_func=lambda m: MONTHS[m - 1], key="look_month")
 default_year = add_months(loan.start_year, loan.start_month, 60)[0]  # ~5 years out
-look_year = c6.number_input("Year", min_value=loan.start_year, max_value=loan.start_year + 100,
+look_year = c8.number_input("Year", min_value=loan.start_year, max_value=loan.start_year + 100,
                             value=default_year, step=1, key="look_year")
 
 target_index = (int(look_year) - loan.start_year) * 12 + (int(look_month) - loan.start_month)
